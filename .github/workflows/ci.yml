@@ -1,0 +1,70 @@
+﻿name: EOIR CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Validate Compose
+        run: |
+          cp .env.example .env
+          sed -i 's/REPLACE_WITH_A_STRONG_PASSWORD/ci-test-password/' .env
+          docker compose config --quiet
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t matrix-eoir-stack:ci .
+
+      - name: Check image size and user
+        run: |
+          SIZE=$(docker image inspect matrix-eoir-stack:ci --format '{{.Size}}')
+          echo "Image size: $SIZE bytes"
+          test "$SIZE" -lt 230686720
+          USER=$(docker image inspect matrix-eoir-stack:ci --format '{{.Config.User}}')
+          test "$USER" = "app:app"
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image name
+        run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push
+        run: |
+          docker build -t "$IMAGE_NAME:${GITHUB_SHA}" \
+                       -t "$IMAGE_NAME:${GITHUB_REF_NAME}" .
+          docker push "$IMAGE_NAME:${GITHUB_SHA}"
+          docker push "$IMAGE_NAME:${GITHUB_REF_NAME}"
